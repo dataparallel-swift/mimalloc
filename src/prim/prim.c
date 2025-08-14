@@ -8,7 +8,10 @@ terms of the MIT license. A copy of the license can be found in the file
 // Select the implementation of the primitives
 // depending on the OS.
 
-#if defined(_WIN32)
+#if defined(MI_USE_CUDA)
+#include "cuda/prim.c"      // GPU-accessible host memory
+
+#elif defined(_WIN32)
 #include "windows/prim.c"  // VirtualAlloc (Windows)
 
 #elif defined(__APPLE__)

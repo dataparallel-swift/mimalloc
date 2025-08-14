@@ -21,6 +21,7 @@ option(MI_WIN_REDIRECT      "Use redirection module ('mimalloc-redirect') on Win
 option(MI_WIN_USE_FIXED_TLS "Use a fixed TLS slot on Windows to avoid extra tests in the malloc fast path" OFF)
 option(MI_LOCAL_DYNAMIC_TLS "Use local-dynamic-tls, a slightly slower but dlopen-compatible thread local storage mechanism (Unix)" OFF)
 option(MI_LIBC_MUSL         "Enable this when linking with musl libc" OFF)
+option(MI_USE_CUDA          "Use the CUDA host memory allocator instead of mmap/VirtualAlloc" OFF)
 
 option(MI_DEBUG_TSAN        "Build with thread sanitizer (needs clang)" OFF)
 option(MI_DEBUG_UBSAN       "Build with undefined-behavior sanitizer (needs clang++)" OFF)
@@ -378,6 +379,13 @@ if(MI_LIBC_MUSL)
   list(APPEND mi_defines MI_LIBC_MUSL=1)
 endif()
 
+if(MI_USE_CUDA)
+  find_package(CUDAToolkit REQUIRED QUIET)
+  message(STATUS "Use the CUDA host memory allocator (with version ${CUDAToolkit_VERSION}) (MI_USE_CUDA=ON)")
+  list(APPEND mi_defines MI_USE_CUDA=1)
+  # list(APPEND mi_libraries cuda)
+endif()
+
 if(MI_WIN_USE_FLS)
   message(STATUS "Use the Fiber API to detect thread termination (deprecated) (MI_WIN_USE_FLS=ON)")
   list(APPEND mi_defines MI_WIN_USE_FLS=1)
@@ -640,6 +648,11 @@ if(MI_BUILD_SHARED)
       COMMENT "Copy mimalloc-redirect${MIMALLOC_REDIRECT_SUFFIX}.dll to output directory")
     install(FILES "$<TARGET_FILE_DIR:mimalloc>/mimalloc-redirect${MIMALLOC_REDIRECT_SUFFIX}.dll" DESTINATION ${CMAKE_INSTALL_BINDIR})
   endif()
+  if(MI_USE_CUDA)
+    target_include_directories(mimalloc PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+    target_link_directories(mimalloc PRIVATE ${CUDAToolkit_LIBRARY_DIR})
+    target_link_libraries(mimalloc PRIVATE CUDA::cuda_driver)
+  endif()
 endif()
 
 
@@ -657,6 +670,11 @@ if (MI_BUILD_STATIC)
   )
   install(TARGETS mimalloc-static EXPORT mimalloc DESTINATION ${mi_install_objdir} LIBRARY)
   install(EXPORT mimalloc DESTINATION ${mi_install_cmakedir})
+  if(MI_USE_CUDA)
+    target_include_directories(mimalloc-static PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+    target_link_directories(mimalloc-static PRIVATE ${CUDAToolkit_LIBRARY_DIR})
+    target_link_libraries(mimalloc-static PRIVATE CUDA::cuda_driver)
+  endif()
 endif()
 
 # install include files
@@ -678,6 +696,9 @@ if (MI_BUILD_OBJECT)
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
       $<INSTALL_INTERFACE:${mi_install_incdir}>
   )
+  if(MI_USE_CUDA)
+    target_include_directories(mimalloc-obj PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
+  endif()
 
   # Copy the generated object file (`static.o`) to the output directory (as `mimalloc.o`)
   if(CMAKE_GENERATOR MATCHES "^Visual Studio.*$")
