@@ -944,10 +944,16 @@ void mi_process_init(void) mi_attr_noexcept {
   _mi_options_init();
   _mi_stats_init();
   _mi_os_init();
+
+  #if defined(MI_USE_CUDA) && defined(MI_MALLOC_OVERRIDE)
+  _mi_prim_cuda_init();
+  #endif
+
   // the following can potentially allocate (on freeBSD for pthread keys)
   // todo: do 2-phase so we can use stats at first, then later init the keys?
   mi_heap_main_init(); // before page_map_init so stats are working
   _mi_page_map_init(); // todo: this could fail.. should we abort in that case?
+
   mi_thread_init();
   _mi_process_is_initialized = true;
 

@@ -1,14 +1,4 @@
-
 // This file is included in `src/prim/prim.c`
-
-#if defined(MI_MALLOC_OVERRIDE)
-// Because initialisation of CUDA requires allocation, interposition with malloc
-// becomes tricky. The furthest I have gotten thus far is that the child thread
-// will crash in pthread_mutex_lock during cuDevicePrimaryCtxRetain(), though I
-// have not yet dug through the sources of pthreads to try and guess why (no
-// debug symbols).
-#error "CUDA backend is currently incompatible with malloc interposition"
-#endif
 
 #ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE   // ensure mmap flags and syscall are defined
@@ -20,6 +10,7 @@
 #include "mimalloc/prim.h"
 
 #include <cuda.h>
+#include <errno.h>        // ENOMEM, ENODEV, EINVAL
 
 #if !defined(_WIN32)
 #include <sys/mman.h>     // mmap
@@ -31,20 +22,6 @@
 #include <sys/sysinfo.h>  // sysinfo
 #endif
 #endif
-
-#define CUDA_SAFE_CALL(it)                                                                                                         \
-  do {                                                                                                                             \
-    CUresult status = it;                                                                                                          \
-    if mi_unlikely(CUDA_SUCCESS != status) {                                                                                       \
-      const char* name;                                                                                                            \
-      const char* description;                                                                                                     \
-      cuGetErrorName(status, &name);                                                                                               \
-      cuGetErrorString(status, &description);                                                                                      \
-      _mi_error_message(status, "%s:%d CUDA call failed with error %s (%d): %s\n", __FILE__, __LINE__, name, status, description); \
-      abort();                                                                                                                     \
-    }                                                                                                                              \
-  } while (0);
-
 
 //------------------------------------------------------------------------------------
 // Use syscalls for some primitives to allow for libraries that override open/read/close etc.
@@ -84,13 +61,166 @@ static inline int mi_prim_close(int fd) {
 // Initialise
 //---------------------------------------------
 
-static mi_decl_thread CUcontext tld_context = NULL;
+enum mi_cuda_init_e {
+  MI_CUDA_INIT_UNINIT = 0,
+  MI_CUDA_INIT_INITING = 1,
+  MI_CUDA_INIT_READY = 2,
+  MI_CUDA_INIT_FAILED = 3
+};
 
-static void _mi_prim_cuda_init(void) {
-  static CUdevice device = 0;
-  static CUcontext context = NULL;
-  static mi_atomic_once_t initialised = 0;
+enum mi_cuda_fallback_e {
+  MI_CUDA_FALLBACK_UNINIT = 0,
+  MI_CUDA_FALLBACK_INITING = 1,
+  MI_CUDA_FALLBACK_READY = 2,
+};
 
+static _Atomic(uintptr_t) mi_cuda_init_state = MI_ATOMIC_VAR_INIT(MI_CUDA_INIT_UNINIT);
+mi_decl_hidden void* mi_cuda_context = NULL;
+
+#if defined(MI_MALLOC_OVERRIDE)
+#define MI_CUDA_FALLBACK_RESERVE_SIZE (16*MI_MiB)
+
+static _Atomic(uintptr_t) mi_cuda_fallback_state = MI_ATOMIC_VAR_INIT(MI_CUDA_FALLBACK_UNINIT);
+static _Atomic(uintptr_t) mi_cuda_fallback_offset = MI_ATOMIC_VAR_INIT(0);
+
+mi_decl_hidden uint8_t* mi_cuda_fallback_base = NULL;
+mi_decl_hidden size_t mi_cuda_fallback_size = 0;
+mi_decl_hidden mi_decl_thread uint32_t mi_cuda_call_count = 0;
+#endif
+
+static inline void mi_cuda_call_enter(void) {
+  #if defined(MI_MALLOC_OVERRIDE)
+  mi_cuda_call_count += 1;
+  #endif
+}
+
+static inline void mi_cuda_call_leave(void) {
+  #if defined(MI_MALLOC_OVERRIDE)
+  mi_cuda_call_count -= 1;
+  #endif
+}
+
+static int mi_cuda_error(CUresult status, const char* api_name) {
+  if (status == CUDA_SUCCESS) return 0;
+  _mi_warning_message("CUDA call failed in %s (status: %d)\n", api_name, (int)status);
+  switch(status) {
+    case CUDA_ERROR_OUT_OF_MEMORY:      return ENOMEM;
+    case CUDA_ERROR_NO_DEVICE:          return ENODEV;
+    case CUDA_ERROR_NOT_INITIALIZED:    return ENODEV;
+    default:                            return EINVAL;
+  }
+}
+
+static int mi_cuda_cuInit(unsigned int flags) {
+  mi_cuda_call_enter();
+  CUresult status = cuInit(flags);
+  mi_cuda_call_leave();
+  return mi_cuda_error(status, "cuInit");
+}
+
+static int mi_cuda_cuDeviceGet(CUdevice* device, int ordinal) {
+  mi_cuda_call_enter();
+  CUresult status = cuDeviceGet(device, ordinal);
+  mi_cuda_call_leave();
+  return mi_cuda_error(status, "cuDeviceGet");
+}
+
+static int mi_cuda_cuDevicePrimaryCtxRetain(CUcontext* pctx, CUdevice dev) {
+  mi_cuda_call_enter();
+  CUresult status = cuDevicePrimaryCtxRetain(pctx, dev);
+  mi_cuda_call_leave();
+  return mi_cuda_error(status, "cuDevicePrimaryCtxRetain");
+}
+
+static int mi_cuda_cuCtxPushCurrent(CUcontext ctx) {
+  mi_cuda_call_enter();
+  CUresult status = cuCtxPushCurrent(ctx);
+  mi_cuda_call_leave();
+  return mi_cuda_error(status, "cuCtxPushCurrent");
+}
+
+static int mi_cuda_cuCtxPopCurrent(void) {
+  mi_cuda_call_enter();
+  CUresult status = cuCtxPopCurrent(NULL);
+  mi_cuda_call_leave();
+  return mi_cuda_error(status, "cuCtxPopCurrent");
+}
+
+static int mi_cuda_cuMemAllocHost(void** pp, size_t bytesize) {
+  mi_cuda_call_enter();
+  CUresult status = cuMemAllocHost(pp, bytesize);
+  mi_cuda_call_leave();
+  return mi_cuda_error(status, "cuMemAllocHost");
+}
+
+static int mi_cuda_cuMemFreeHost(void* p) {
+  mi_cuda_call_enter();
+  CUresult status = cuMemFreeHost(p);
+  mi_cuda_call_leave();
+  return mi_cuda_error(status, "cuMemFreeHost");
+}
+
+#if defined(MI_MALLOC_OVERRIDE)
+static bool mi_cuda_fallback_ensure(void) {
+  if (mi_atomic_load_acquire(&mi_cuda_fallback_state) == MI_CUDA_FALLBACK_READY) {
+    return (mi_cuda_fallback_base != NULL);
+  }
+
+  uintptr_t expected = MI_CUDA_FALLBACK_UNINIT;
+  if (mi_atomic_cas_strong_acq_rel(&mi_cuda_fallback_state, &expected, (uintptr_t)MI_CUDA_FALLBACK_INITING)) {
+    const size_t reserve_size = MI_CUDA_FALLBACK_RESERVE_SIZE;
+    void* p = mmap(NULL, reserve_size, (PROT_READ | PROT_WRITE), (MAP_PRIVATE | MAP_ANONYMOUS), -1, 0);
+    if (p != MAP_FAILED) {
+      mi_cuda_fallback_base = (uint8_t*)p;
+      mi_cuda_fallback_size = reserve_size;
+    }
+    mi_atomic_store_release(&mi_cuda_fallback_state, (uintptr_t)MI_CUDA_FALLBACK_READY);
+  }
+  else {
+    while (mi_atomic_load_acquire(&mi_cuda_fallback_state) == MI_CUDA_FALLBACK_INITING) {
+      mi_atomic_yield();
+    }
+  }
+
+  return (mi_cuda_fallback_base != NULL);
+}
+
+int _mi_cuda_fallback_alloc_aligned(size_t size, size_t alignment, void** addr) {
+  mi_assert_internal(alignment > 0 && (alignment & (alignment - 1)) == 0); // power of two
+  mi_assert_internal(alignment % sizeof(void*) == 0);                      // multiple of sizeof(void*)
+
+  if (!mi_cuda_fallback_ensure()) return ENOMEM;
+
+  // Reserve worst-case space: size + up to (alignment-1) bytes of padding.
+  // The mmap base is page-aligned so it is already a multiple of any reasonable alignment;
+  // we align the raw pointer upward within the reserved region after the atomic bump.
+  const uintptr_t reserve = (uintptr_t)size + (uintptr_t)(alignment - 1);
+  uintptr_t offset = mi_atomic_add_acq_rel(&mi_cuda_fallback_offset, reserve);
+  if (offset > (uintptr_t)mi_cuda_fallback_size || reserve > ((uintptr_t)mi_cuda_fallback_size - offset)) {
+    _mi_error_message(ENOMEM, "CUDA fallback arena exhausted (requested: %zu bytes, reserved: %zu bytes)\n", size, mi_cuda_fallback_size);
+    return ENOMEM;
+  }
+
+  const uintptr_t raw = (uintptr_t)(mi_cuda_fallback_base + offset);
+  *addr = (void*)((raw + (uintptr_t)(alignment - 1)) & ~(uintptr_t)(alignment - 1));
+
+  // mi_os_stat_counter_increase(cuda_fallback_alloc, 1);
+  // mi_os_stat_counter_increase(cuda_fallback_bytes, reserve);
+  // mi_os_stat_counter_increase(cuda_fallback_slop, reserve - size);
+  return 0;
+}
+
+int _mi_cuda_fallback_alloc(size_t size, void** addr) {
+  return _mi_cuda_fallback_alloc_aligned(size, 16, addr);
+}
+
+void _mi_cuda_fallback_free(void* addr) {
+  MI_UNUSED(addr);
+  // mi_os_stat_counter_increase(cuda_fallback_free, 1);
+}
+#endif
+
+int _mi_prim_cuda_init(void) {
   // We only need to initialise CUDA once, but the context must be bound to
   // every CPU thread. All host memory that we allocate (via cuMemAllocHost)
   // will automatically be immediately accessible to all contexts on all devices
@@ -98,24 +228,42 @@ static void _mi_prim_cuda_init(void) {
   // to access this host memory from those contexts is always equal to the
   // returned host pointer. Thus it is safe to initialise only the first device
   // and use the default context.
-  if (mi_atomic_once(&initialised)) {
-    CUDA_SAFE_CALL(cuInit(0));
-    CUDA_SAFE_CALL(cuDeviceGet(&device, 0));
-    CUDA_SAFE_CALL(cuDevicePrimaryCtxRetain(&context, device));
+  uintptr_t state = mi_atomic_load_acquire(&mi_cuda_init_state);
+  if (state == MI_CUDA_INIT_FAILED) {
+    return ENODEV;
   }
-  mi_assert(context != NULL);
 
-#if MI_DEBUG > 2
-  CUcontext current = NULL;
-  CUDA_SAFE_CALL(cuCtxGetCurrent(&current));
-  mi_assert(current == NULL);
-#endif
+  bool do_init = false;
+  if (state == MI_CUDA_INIT_UNINIT) {
+    uintptr_t expected = MI_CUDA_INIT_UNINIT;
+    do_init = mi_atomic_cas_strong_acq_rel(&mi_cuda_init_state, &expected, (uintptr_t)MI_CUDA_INIT_INITING);
+  }
 
-  mi_assert(tld_context == NULL);
-  CUDA_SAFE_CALL(cuCtxPushCurrent(context));
-  tld_context = context;
+  if (do_init) {
+    CUdevice device = 0;
+    CUcontext context = NULL;
+    int err = mi_cuda_cuInit(0);
+    if (err == 0) err = mi_cuda_cuDeviceGet(&device, 0);
+    if (err == 0) err = mi_cuda_cuDevicePrimaryCtxRetain(&context, device);
+    if (err != 0 || context == NULL) {
+      mi_atomic_store_release(&mi_cuda_init_state, (uintptr_t)MI_CUDA_INIT_FAILED);
+      return (err != 0 ? err : ENODEV);
+    }
+    mi_cuda_context = context;
+    mi_atomic_store_release(&mi_cuda_init_state, (uintptr_t)MI_CUDA_INIT_READY);
+  }
+  else {
+    do {
+      state = mi_atomic_load_acquire(&mi_cuda_init_state);
+      if (state == MI_CUDA_INIT_FAILED) return ENODEV;
+      if (state == MI_CUDA_INIT_READY) break;
+      mi_atomic_yield();
+    } while(true);
+  }
+
+  mi_assert_internal(mi_cuda_context != NULL);
+  return 0;
 }
-
 
 #if !defined(_WIN32)
 // try to detect the physical memory dynamically (if possible)
@@ -184,8 +332,13 @@ void _mi_prim_mem_init( mi_os_mem_config_t* config ) {
 
 int _mi_prim_free(void* addr, size_t size) {
   if (size==0) return 0;
-  CUDA_SAFE_CALL(cuMemFreeHost(addr));
-  return 0;
+#if defined(MI_MALLOC_OVERRIDE)
+  mi_assert_internal(!_mi_cuda_fallback_contains(addr));
+#endif
+  int err = mi_cuda_cuCtxPushCurrent(mi_cuda_context);
+  if (err == 0) err = mi_cuda_cuMemFreeHost(addr);
+  if (err == 0) err = mi_cuda_cuCtxPopCurrent();
+  return err;
 }
 
 
@@ -205,12 +358,27 @@ int _mi_prim_alloc(void* hint_addr, size_t size, size_t try_alignment, bool comm
 
   *is_large = false;
   *is_zero = false;
+  *addr = NULL;
 
-  if mi_unlikely(tld_context == NULL) {
-    _mi_prim_cuda_init();
+#if defined(MI_MALLOC_OVERRIDE)
+  // In override mode, we should only reach this point if we are ready to call
+  // the actual CUDA allocator. Any reentrant allocations should have been
+  // diverted to the fallback allocator already, so that we are sure that all of
+  // the internal mimalloc state is CUDA accessible.
+  mi_assert_internal(mi_cuda_context != NULL);
+  mi_assert_internal(mi_cuda_call_count == 0);
+#else
+  // Lazily initialise the CUDA context. Any reentrant allocations will be
+  // handled by the default (non-overridden) malloc() implementation.
+  if mi_unlikely(mi_cuda_context == NULL) {
+    const int err = _mi_prim_cuda_init();
+    if (err != 0) return err;
   }
-  CUDA_SAFE_CALL(cuMemAllocHost(addr, size));
-  return 0;
+#endif
+  int err = mi_cuda_cuCtxPushCurrent(mi_cuda_context);
+  if (err == 0) err = mi_cuda_cuMemAllocHost(addr, size);
+  if (err == 0) err = mi_cuda_cuCtxPopCurrent();
+  return err;
 }
 
 
@@ -801,4 +969,3 @@ bool _mi_prim_thread_is_in_threadpool(void) {
 }
 
 #endif  // _WIN32
-
