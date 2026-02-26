@@ -80,6 +80,12 @@ typedef struct mi_stat_counter_s {
   MI_STAT_COUNTER(pages_unabandon_busy_wait) \
   MI_STAT_COUNTER(heaps_delete_wait)
 
+  // /* fallback bump allocator for CUDA backend */
+  // MI_CUDA_STAT_COUNTER(cuda_fallback_alloc)
+  // MI_CUDA_STAT_COUNTER(cuda_fallback_free)
+  // MI_CUDA_STAT_COUNTER(cuda_fallback_bytes)
+  // MI_CUDA_STAT_COUNTER(cuda_fallback_slop)
+
 // Size bins for chunks
 typedef enum mi_chunkbin_e {
   MI_CBIN_SMALL,    // slice_count == 1

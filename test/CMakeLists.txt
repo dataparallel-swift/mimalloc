@@ -54,3 +54,11 @@ target_link_libraries(static-override-cxx PUBLIC mimalloc-static)
 ## test memory errors
 add_executable(test-wrong  test-wrong.c)
 target_link_libraries(test-wrong PUBLIC mimalloc)
+
+if(UNIX AND NOT APPLE)
+  find_package(CUDAToolkit QUIET)
+  if(CUDAToolkit_FOUND)
+    add_executable(dynamic-cuda-interpose test-cuda-interpose.c)
+    target_link_libraries(dynamic-cuda-interpose PUBLIC mimalloc CUDA::cuda_driver)
+  endif()
+endif()

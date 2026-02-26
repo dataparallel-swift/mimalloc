@@ -178,6 +178,7 @@ static inline mi_page_t* mi_validate_ptr_page(const void* p, const char* msg)
 // Fast path written carefully to prevent register spilling on the stack
 static mi_decl_forceinline void mi_free_ex(void* p, size_t* usable, mi_page_t* page)  
 {
+  if mi_unlikely(p == NULL) return;
   if mi_unlikely(page==NULL) return;  // page will be NULL if p==NULL
   mi_assert_internal(p!=NULL && page!=NULL);
   if (usable!=NULL) { *usable = mi_page_usable_block_size(page); }
@@ -205,11 +206,27 @@ static mi_decl_forceinline void mi_free_ex(void* p, size_t* usable, mi_page_t* p
 }
 
 void mi_free(void* p) mi_attr_noexcept {
-  mi_page_t* const page = mi_validate_ptr_page(p,"mi_free");  
+  if mi_unlikely(p == NULL) return;
+
+  #if defined(MI_USE_CUDA) && defined(MI_MALLOC_OVERRIDE)
+  if mi_unlikely(_mi_cuda_fallback_contains(p)) {
+    return _mi_cuda_fallback_free(p);
+  }
+  #endif
+
+  mi_page_t* const page = mi_validate_ptr_page(p,"mi_free");
   mi_free_ex(p, NULL, page);
 }
 
 void mi_ufree(void* p, size_t* usable) mi_attr_noexcept {
+  if mi_unlikely(p == NULL) return;
+
+  #if defined(MI_USE_CUDA) && defined(MI_MALLOC_OVERRIDE)
+  if mi_unlikely(_mi_cuda_fallback_contains(p)) {
+    return _mi_cuda_fallback_free(p);
+  }
+  #endif
+
   mi_page_t* const page = mi_validate_ptr_page(p,"mi_ufree");  
   mi_free_ex(p, usable, page);
 }
@@ -418,6 +435,14 @@ static inline size_t _mi_usable_size(const void* p, const mi_page_t* page) mi_at
 }
 
 mi_decl_nodiscard size_t mi_usable_size(const void* p) mi_attr_noexcept {
+  if mi_unlikely(p == NULL) return 0;
+
+  #if defined(MI_USE_CUDA) && defined(MI_MALLOC_OVERRIDE)
+  if mi_unlikely(_mi_cuda_fallback_contains(p)) {
+    return 0;
+  }
+  #endif
+
   const mi_page_t* const page = mi_validate_ptr_page(p,"mi_usable_size");
   return _mi_usable_size(p,page);
 }
