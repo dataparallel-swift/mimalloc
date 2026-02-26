@@ -225,6 +225,15 @@ static mi_decl_forceinline void* mi_theap_malloc_zero_nonnull(mi_theap_t* theap,
 }
 
 extern mi_decl_forceinline void* _mi_theap_malloc_zero_ex(mi_theap_t* theap, size_t size, bool zero, size_t huge_alignment, size_t* usable) mi_attr_noexcept {
+  #if defined(MI_USE_CUDA) && defined(MI_MALLOC_OVERRIDE)
+  if mi_unlikely(!_mi_prim_cuda_ready()) {
+    void* ptr;
+    int err = _mi_cuda_fallback_alloc(size, &ptr);
+    if (err != 0) return NULL;
+    return ptr;
+  }
+  #endif
+
   // fast path for small objects
   #if MI_THEAP_INITASNULL
   if mi_likely(theap!=NULL && size <= MI_SMALL_SIZE_MAX)
@@ -350,12 +359,18 @@ void* mi_expand(void* p, size_t newsize) mi_attr_noexcept {
 }
 
 void* _mi_theap_realloc_zero(mi_theap_t* theap, void* p, size_t newsize, bool zero, size_t* usable_pre, size_t* usable_post) mi_attr_noexcept {
+  #if defined(MI_USE_CUDA) && defined(MI_MALLOC_OVERRIDE)
+  const bool is_fallback = _mi_cuda_fallback_contains(p);
+  #else
+  const bool is_fallback = false;
+  #endif
+
   // if p == NULL then behave as malloc.
   // else if size == 0 then reallocate to a zero-sized block (and don't return NULL, just as mi_malloc(0)).
   // (this means that returning NULL always indicates an error, and `p` will not have been freed in that case.)
   const mi_page_t* page;
   size_t size;
-  if (p==NULL) {
+  if mi_unlikely(p==NULL || is_fallback) {
     page = NULL;
     size = 0;
     if (usable_pre!=NULL) { *usable_pre = 0; }
@@ -386,7 +401,14 @@ void* _mi_theap_realloc_zero(mi_theap_t* theap, void* p, size_t newsize, bool ze
       ((uint8_t*)newp)[0] = 0; // work around for applications that expect zero-reallocation to be zero initialized (issue #725)
     }
     if mi_likely(p != NULL) {
-      const size_t copysize = (newsize > size ? size : newsize);
+      const size_t copysize =
+        #if defined(MI_USE_CUDA) && defined(MI_MALLOC_OVERRIDE)
+            // XXX SECURITY: This will not read out-of-bounds (if the fallback
+            // arena is full we'll already have failed to allocate the block)
+            // but it may copy data that didn't belong to us.
+            is_fallback ? newsize :
+        #endif
+            (newsize > size ? size : newsize);
       mi_track_mem_defined(p,copysize);  // _mi_useable_size may be too large for byte precise memory tracking..
       _mi_memcpy(newp, p, copysize);
       mi_free(p); // only free the original pointer if successful  // todo: optimize since page is known?

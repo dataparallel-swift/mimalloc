@@ -189,6 +189,15 @@ static inline void* mi_theap_malloc_zero_aligned_at(mi_theap_t* const theap, con
     return NULL;
   }
 
+  #if defined(MI_USE_CUDA) && defined(MI_MALLOC_OVERRIDE)
+  if mi_unlikely(!_mi_prim_cuda_ready()) {
+    void* ptr;
+    int err = _mi_cuda_fallback_alloc_aligned(size, alignment, &ptr);
+    if (err != 0) return NULL;
+    return ptr;
+  }
+  #endif
+
   #if MI_GUARDED
   #if MI_THEAP_INITASNULL
   if mi_likely(theap!=NULL)

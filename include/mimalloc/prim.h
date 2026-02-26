@@ -126,6 +126,29 @@ void _mi_prim_thread_associate_default_theap(mi_theap_t* theap);
 // Is this thread part of a thread pool?
 bool _mi_prim_thread_is_in_threadpool(void);
 
+#if defined(MI_USE_CUDA) && defined(MI_MALLOC_OVERRIDE)
+int _mi_prim_cuda_init(void);
+int _mi_cuda_fallback_alloc_aligned(size_t size, size_t alignment, void** addr);
+int _mi_cuda_fallback_alloc(size_t size, void** addr);
+void _mi_cuda_fallback_free(void* addr);
+
+extern mi_decl_hidden void* mi_cuda_context;
+extern mi_decl_hidden mi_decl_thread uint32_t mi_cuda_call_count;
+extern mi_decl_hidden uint8_t* mi_cuda_fallback_base;
+extern mi_decl_hidden size_t mi_cuda_fallback_size;
+
+static inline bool _mi_prim_cuda_ready(void) {
+  return (mi_cuda_context != NULL && mi_cuda_call_count == 0);
+}
+
+static inline bool _mi_cuda_fallback_contains(const void* addr) {
+  const uint8_t* const base = mi_cuda_fallback_base;
+  if mi_unlikely(base == NULL || addr == NULL) return false;
+
+  const uint8_t* const p = (const uint8_t*)addr;
+  return (p >= base && p < (base + mi_cuda_fallback_size));
+}
+#endif
 
 //-------------------------------------------------------------------
 // Access to TLS (thread local storage) slots.
