@@ -192,10 +192,10 @@ static void mi_stat_print_ex(const mi_stat_count_t* stat, const char* msg, int64
       mi_print_count(stat->total, unit, out, arg);
     }
     else {
-      mi_print_amount(stat->peak, -1, out, arg);
-      mi_print_amount(stat->total, -1, out, arg);
-      // mi_print_amount(stat->freed, -1, out, arg);
-      mi_print_amount(stat->current, -1, out, arg);
+      mi_print_amount(stat->peak, -unit, out, arg);
+      mi_print_amount(stat->total, -unit, out, arg);
+      // mi_print_amount(stat->freed, -unit, out, arg);
+      mi_print_amount(stat->current, -unit, out, arg);
       if (unit == -1) {
         _mi_fprintf(out, arg, "%24s", "");
       }
@@ -410,8 +410,8 @@ void _mi_stats_print(const char* name, size_t id, mi_stats_t* stats, mi_output_f
     mi_stat_print_ex(&stats->threads, "threads", 0, out, arg, "");
     _mi_fprintf(out, arg, "  %-10s: %5i\n", "numa nodes", _mi_os_numa_node_count());
     mi_process_info_print_out(out, arg);
+    _mi_fprintf(out, arg, "\n");
   }
-  _mi_fprintf(out, arg, "\n");
 }
 
 

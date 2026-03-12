@@ -424,17 +424,18 @@ typedef struct mi_option_desc_s {
 #define MI_UNUSED_RELEASE(x)  MI_UNUSED(x)
 #endif
 
-#define MI_INIT4(x)   x(),x(),x(),x()
+#define MI_INIT2(x)   x(),x()
+#define MI_INIT3(x)   MI_INIT2(x),x()
+#define MI_INIT4(x)   MI_INIT2(x),MI_INIT2(x)
+#define MI_INIT5(x)   MI_INIT4(x),x()
+#define MI_INIT6(x)   MI_INIT4(x),MI_INIT2(x)
 #define MI_INIT8(x)   MI_INIT4(x),MI_INIT4(x)
 #define MI_INIT16(x)  MI_INIT8(x),MI_INIT8(x)
 #define MI_INIT32(x)  MI_INIT16(x),MI_INIT16(x)
 #define MI_INIT64(x)  MI_INIT32(x),MI_INIT32(x)
+#define MI_INIT74(x)  MI_INIT64(x),MI_INIT8(x),x(),x()
 #define MI_INIT128(x) MI_INIT64(x),MI_INIT64(x)
 #define MI_INIT256(x) MI_INIT128(x),MI_INIT128(x)
-
-#define MI_INIT74(x)  MI_INIT64(x),MI_INIT8(x),x(),x()
-#define MI_INIT5(x)   MI_INIT4(x),x()
-#define MI_INIT6(x)   MI_INIT4(x),x(),x()
 
 #include <string.h>
 // initialize a local variable to zero; use memset as compilers optimize constant sized memset's
