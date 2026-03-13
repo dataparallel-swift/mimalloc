@@ -148,6 +148,11 @@ static inline bool _mi_cuda_fallback_contains(const void* addr) {
   const uint8_t* const p = (const uint8_t*)addr;
   return (p >= base && p < (base + mi_cuda_fallback_size));
 }
+
+// Every fallback allocation stores round_up(size, 16) as a size_t at ptr - 16.
+static inline size_t _mi_cuda_fallback_sizeof(const void* p) {
+  return *(const size_t*)((const uint8_t*)p - 16);
+}
 #endif
 
 //-------------------------------------------------------------------
