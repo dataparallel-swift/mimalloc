@@ -372,8 +372,12 @@ void* _mi_theap_realloc_zero(mi_theap_t* theap, void* p, size_t newsize, bool ze
   size_t size;
   if mi_unlikely(p==NULL || is_fallback) {
     page = NULL;
+    #if defined(MI_USE_CUDA) && defined(MI_MALLOC_OVERRIDE)
+    size = is_fallback ? _mi_cuda_fallback_sizeof(p) : 0;
+    #else
     size = 0;
-    if (usable_pre!=NULL) { *usable_pre = 0; }
+    #endif
+    if (usable_pre!=NULL) { *usable_pre = size; }
   }
   else {
     page = mi_validate_ptr_page(p,"mi_realloc");
@@ -381,6 +385,7 @@ void* _mi_theap_realloc_zero(mi_theap_t* theap, void* p, size_t newsize, bool ze
     if (usable_pre!=NULL) { *usable_pre = mi_page_usable_block_size(page); }
   }
   if mi_unlikely(newsize<=size && newsize>=(size/2) && newsize>0  // note: newsize must be > 0 or otherwise we return NULL for realloc(NULL,0)
+                  && !is_fallback                                 // fallback pointers have no page; page == NULL
                   && mi_page_heap(page)==theap->heap)             // and within the same heap
   {
     mi_assert_internal(p!=NULL);
@@ -401,14 +406,7 @@ void* _mi_theap_realloc_zero(mi_theap_t* theap, void* p, size_t newsize, bool ze
       ((uint8_t*)newp)[0] = 0; // work around for applications that expect zero-reallocation to be zero initialized (issue #725)
     }
     if mi_likely(p != NULL) {
-      const size_t copysize =
-        #if defined(MI_USE_CUDA) && defined(MI_MALLOC_OVERRIDE)
-            // XXX SECURITY: This will not read out-of-bounds (if the fallback
-            // arena is full we'll already have failed to allocate the block)
-            // but it may copy data that didn't belong to us.
-            is_fallback ? newsize :
-        #endif
-            (newsize > size ? size : newsize);
+      const size_t copysize = (newsize > size ? size : newsize);
       mi_track_mem_defined(p,copysize);  // _mi_useable_size may be too large for byte precise memory tracking..
       _mi_memcpy(newp, p, copysize);
       mi_free(p); // only free the original pointer if successful  // todo: optimize since page is known?

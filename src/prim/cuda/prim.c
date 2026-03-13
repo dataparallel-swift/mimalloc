@@ -186,15 +186,25 @@ static bool mi_cuda_fallback_ensure(void) {
 }
 
 int _mi_cuda_fallback_alloc_aligned(size_t size, size_t alignment, void** addr) {
-  mi_assert_internal(alignment > 0 && (alignment & (alignment - 1)) == 0); // power of two
-  mi_assert_internal(alignment % sizeof(void*) == 0);                      // multiple of sizeof(void*)
+  mi_assert_internal(alignment >= 16 && (alignment & (alignment - 1)) == 0); // power of two, at least 16
 
   if (!mi_cuda_fallback_ensure()) return ENOMEM;
 
-  // Reserve worst-case space: size + up to (alignment-1) bytes of padding.
-  // The mmap base is page-aligned so it is already a multiple of any reasonable alignment;
-  // we align the raw pointer upward within the reserved region after the atomic bump.
-  const uintptr_t reserve = (uintptr_t)size + (uintptr_t)(alignment - 1);
+  // Round size up to a multiple of 16. This lets realloc safely copy rsize
+  // bytes from a fallback allocation without reading out-of-bounds.
+  const size_t rsize = _mi_align_up(size, 16);
+
+  // Reserve alignment + rsize bytes.
+  //
+  // Invariant: the bump offset is always a multiple of 16. Since alignment >= 16
+  // and rsize are both multiples of 16, every reservation keeps the offset
+  // 16-aligned, so raw = base + offset is always 16-aligned.
+  //
+  // Returned ptr = align_up(raw + 16, alignment), which lies in [raw+16, raw+alignment].
+  // The 16 bytes before ptr (i.e. [ptr-16, ptr)) are within our reserved region because
+  // ptr >= raw + 16, so this is where we store rsize.  The data [ptr, ptr+rsize) ends at
+  // most at raw + alignment + rsize = raw + reserve, which is exactly our reservation.
+  const size_t reserve = alignment + rsize;
   uintptr_t offset = mi_atomic_add_acq_rel(&mi_cuda_fallback_offset, reserve);
   if (offset > (uintptr_t)mi_cuda_fallback_size || reserve > ((uintptr_t)mi_cuda_fallback_size - offset)) {
     _mi_error_message(ENOMEM, "CUDA fallback arena exhausted (requested: %zu bytes, reserved: %zu bytes)\n", size, mi_cuda_fallback_size);
@@ -202,11 +212,14 @@ int _mi_cuda_fallback_alloc_aligned(size_t size, size_t alignment, void** addr) 
   }
 
   const uintptr_t raw = (uintptr_t)(mi_cuda_fallback_base + offset);
-  *addr = (void*)((raw + (uintptr_t)(alignment - 1)) & ~(uintptr_t)(alignment - 1));
+  const uintptr_t ptr = _mi_align_up(raw + 16, alignment);
+
+  // Store the rounded size in the header word immediately before the allocation.
+  *(size_t*)(ptr - 16) = rsize;
 
   // mi_os_stat_counter_increase(cuda_fallback_alloc, 1);
   // mi_os_stat_counter_increase(cuda_fallback_bytes, reserve);
-  // mi_os_stat_counter_increase(cuda_fallback_slop, reserve - size);
+  *addr = (void*)ptr;
   return 0;
 }
 

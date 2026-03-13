@@ -394,7 +394,7 @@ static inline size_t _mi_usable_size(const void* p, const mi_page_t* page) mi_at
 mi_decl_nodiscard size_t mi_usable_size(const void* p) mi_attr_noexcept {
   #if defined(MI_USE_CUDA) && defined(MI_MALLOC_OVERRIDE)
   if mi_unlikely(_mi_cuda_fallback_contains(p)) {
-    return 0;
+    return _mi_cuda_fallback_sizeof(p);
   }
   #endif
 
