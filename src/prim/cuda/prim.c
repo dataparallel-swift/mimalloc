@@ -85,18 +85,20 @@ static _Atomic(uintptr_t) mi_cuda_fallback_offset = MI_ATOMIC_VAR_INIT(0);
 
 mi_decl_hidden uint8_t* mi_cuda_fallback_base = NULL;
 mi_decl_hidden size_t mi_cuda_fallback_size = 0;
-mi_decl_hidden mi_decl_thread uint32_t mi_cuda_call_count = 0;
+mi_decl_hidden mi_decl_thread bool mi_cuda_in_api = false;
 #endif
 
 static inline void mi_cuda_call_enter(void) {
   #if defined(MI_MALLOC_OVERRIDE)
-  mi_cuda_call_count += 1;
+  mi_assert_internal(!mi_cuda_in_api); // true means malloc() recursed inside a CUDA API call
+  mi_cuda_in_api = true;
   #endif
 }
 
 static inline void mi_cuda_call_leave(void) {
   #if defined(MI_MALLOC_OVERRIDE)
-  mi_cuda_call_count -= 1;
+  mi_assert_internal(mi_cuda_in_api); // leave without matching enter
+  mi_cuda_in_api = false;
   #endif
 }
 
@@ -379,7 +381,7 @@ int _mi_prim_alloc(void* hint_addr, size_t size, size_t try_alignment, bool comm
   // diverted to the fallback allocator already, so that we are sure that all of
   // the internal mimalloc state is CUDA accessible.
   mi_assert_internal(mi_cuda_context != NULL);
-  mi_assert_internal(mi_cuda_call_count == 0);
+  mi_assert_internal(!mi_cuda_in_api);
 #else
   // Lazily initialise the CUDA context. Any reentrant allocations will be
   // handled by the default (non-overridden) malloc() implementation.
