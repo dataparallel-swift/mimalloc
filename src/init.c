@@ -946,7 +946,17 @@ void mi_process_init(void) mi_attr_noexcept {
   _mi_os_init();
 
   #if defined(MI_USE_CUDA) && defined(MI_MALLOC_OVERRIDE)
-  _mi_prim_cuda_init();
+  if (_mi_prim_cuda_init() != 0) {
+    // In override mode every allocation must come from CUDA host memory so
+    // that the returned pointer is GPU-accessible. Silently falling back to
+    // mmap would hand the caller normal CPU memory that will fault on first
+    // GPU access. Abort early with a clear message rather than letting the
+    // program limp on with broken memory semantics.
+    _mi_error_message(ENODEV, "fatal: CUDA host memory allocator requested (MI_USE_CUDA) "
+                              "but CUDA initialisation failed. "
+                              "Ensure that a CUDA-capable GPU and driver are present.\n");
+    abort();
+  }
   #endif
 
   // the following can potentially allocate (on freeBSD for pthread keys)
