@@ -236,9 +236,9 @@ void _mi_cuda_fallback_free(void* addr) {
 #endif
 
 int _mi_prim_cuda_init(void) {
-  // We only need to initialise CUDA once, but the context must be bound to
-  // every CPU thread. All host memory that we allocate (via cuMemAllocHost)
-  // will automatically be immediately accessible to all contexts on all devices
+  // We only need to initialise CUDA once, and every thread will use the same
+  // context. All host memory that we allocate (via cuMemAllocHost) will
+  // automatically be immediately accessible to all contexts on all devices
   // which support unified addressing, and the device pointer that may be used
   // to access this host memory from those contexts is always equal to the
   // returned host pointer. Thus it is safe to initialise only the first device
@@ -365,9 +365,19 @@ int _mi_prim_free(void* addr, size_t size) {
 // The `try_alignment` is just a hint and the returned pointer does not have to be aligned.
 int _mi_prim_alloc(void* hint_addr, size_t size, size_t try_alignment, bool commit, bool allow_large, bool* is_large, bool* is_zero, void** addr) {
   MI_UNUSED(hint_addr);
-  MI_UNUSED(try_alignment);
-  MI_UNUSED(commit);
   MI_UNUSED(allow_large);
+
+  // cuMemAllocHost always returns committed memory
+  MI_UNUSED(commit);
+
+  // cuMemAllocHost only guarantees alignment suitable for any C variable (~16
+  // bytes per spec). In practice on x86-64 and ARM64, CUDA returns page-aligned
+  // (≥4 KiB) allocations that empirically meet MI_ARENA_SLICE_ALIGN (64 KiB).
+  // If not, the caller (mi_os_prim_alloc_aligned in os.c) detects misalignment
+  // and handles it by over-allocating size+alignment and aligning within;
+  // has_partial_free=false ensures it keeps the original cuMemAllocHost pointer
+  // for cuMemFreeHost.
+  MI_UNUSED(try_alignment);
 
   mi_assert_internal(size > 0 && (size % _mi_os_page_size()) == 0);
 
@@ -390,6 +400,19 @@ int _mi_prim_alloc(void* hint_addr, size_t size, size_t try_alignment, bool comm
     if (err != 0) return err;
   }
 #endif
+
+  // Ensure that the calling thread has the correct context set before
+  // attempting to allocate. This is a little expensive (manipulating the TLS)
+  // but allocations should be very rare, so this is acceptable (one
+  // cuMemAllocHost call amortized over potentially millions of user allocations
+  // from each slab). This also supports the use case where the user's code is
+  // manipulating the CUDA context stack, which we can't know about, so this
+  // push/pop approach is safer in a (potentially) mixed environment.
+  //
+  // We could potentially reduce the cost of this by setting the context once
+  // per thread in mi_thread_init(), and first checking if the current context
+  // is the one we expect (cuCtxGetCurrent, presumably cheap with only a TLS
+  // read), and skip push/pop if it is.
   int err = mi_cuda_cuCtxPushCurrent(mi_cuda_context);
   if (err == 0) err = mi_cuda_cuMemAllocHost(addr, size);
   if (err == 0) err = mi_cuda_cuCtxPopCurrent();
