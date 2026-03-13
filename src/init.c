@@ -945,6 +945,17 @@ void mi_process_init(void) mi_attr_noexcept {
   _mi_stats_init();
   _mi_os_init();
 
+  // Initialise CUDA as soon as possible, so that we guarantee that pointers
+  // handed out by mimalloc are GPU-accessible (i.e. were ultimately allocated
+  // by cuMemAllocHost). Strictly speaking we don't need mimalloc's internal
+  // data structures to be allocated in this way as well, but I'm currently not
+  // skilled enough in this codebase to make that separation (I think we'll have
+  // to separate OS allocation from backing allocation; for most platforms this
+  // will be the same thing, but for CUDA those would differ).
+  //
+  // During CUDA initialisation this will recurse into the fallback bump
+  // allocator. There is a bit of loss here (internal calls to realloc and free)
+  // but mostly that data needs to live for the lifetime of the program anyway.
   #if defined(MI_USE_CUDA) && defined(MI_MALLOC_OVERRIDE)
   if (_mi_prim_cuda_init() != 0) {
     // In override mode every allocation must come from CUDA host memory so
