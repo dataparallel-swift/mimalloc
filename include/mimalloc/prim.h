@@ -133,12 +133,12 @@ int _mi_cuda_fallback_alloc(size_t size, void** addr);
 void _mi_cuda_fallback_free(void* addr);
 
 extern mi_decl_hidden void* mi_cuda_context;
-extern mi_decl_hidden mi_decl_thread uint32_t mi_cuda_call_count;
+extern mi_decl_hidden mi_decl_thread bool mi_cuda_in_api;
 extern mi_decl_hidden uint8_t* mi_cuda_fallback_base;
 extern mi_decl_hidden size_t mi_cuda_fallback_size;
 
 static inline bool _mi_prim_cuda_ready(void) {
-  return (mi_cuda_context != NULL && mi_cuda_call_count == 0);
+  return (mi_cuda_context != NULL && !mi_cuda_in_api);
 }
 
 static inline bool _mi_cuda_fallback_contains(const void* addr) {
