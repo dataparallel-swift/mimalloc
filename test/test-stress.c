@@ -22,6 +22,15 @@ terms of the MIT license.
 #include <string.h>
 #include <assert.h>
 
+/* Validate that every pointer returned by mimalloc is GPU accessible. Useful in
+ * CUDA interposition mode (MI_USE_CUDA and MI_MALLOC_OVERRIDE). Expensive test,
+ * disabled by default.
+ */
+#ifdef MI_USE_CUDA
+// #define MI_CUDA_STRESS
+#include <cuda.h>
+#endif
+
 // #define MI_GUARDED         1
 // #define USE_STD_MALLOC     1
 
@@ -105,6 +114,45 @@ static mi_heap_t* current_heap;
 
 #endif
 
+#ifdef MI_CUDA_STRESS
+static CUcontext context = NULL;
+
+static void check_device_accessible(void* p) {
+  CUdeviceptr dptr = 0;
+  CUresult status = cuMemHostGetDevicePointer(&dptr, p, 0 /* flags */);
+  if (status != CUDA_SUCCESS) {
+    fprintf(stderr, "cuMemHostGetDevicePointer failed (status=%d, ptr=%p)\n", status, p);
+    abort();
+  }
+
+  if ((uintptr_t)dptr != (uintptr_t)p) {
+    fprintf(stderr, "CUDA device pointer mismatch (host=%p, device=%p)\n", p, (void*)(uintptr_t)dptr);
+    abort();
+  }
+}
+
+static void* checked_calloc(size_t count, size_t size) {
+  void* p = custom_calloc(count, size);
+  check_device_accessible(p);
+  return p;
+}
+
+static void* checked_realloc(void* ptr, size_t size) {
+  void* new_p = custom_realloc(ptr, size);
+  check_device_accessible(new_p);
+  return new_p;
+}
+
+static void checked_free(void* ptr) {
+  custom_free(ptr);
+}
+
+#else
+#define checked_calloc(n,s)   custom_calloc(n,s)
+#define checked_realloc(p,s)  custom_realloc(p,s)
+#define checked_free(p)       custom_free(p)
+#endif
+
 // transfer pointer between threads
 #define TRANSFERS     (1000)
 static volatile void* transfer[TRANSFERS];
@@ -154,7 +202,7 @@ static void* alloc_items(size_t items, random_t r) {
   if (items>=32 && items<=40) items*=2;              // pthreads uses 320b allocations (this shows that more clearly in the stats)
   if (use_one_size > 0) items = (use_one_size / sizeof(uintptr_t));
   if (items==0) items = 1;  
-  uintptr_t* p = (uintptr_t*)custom_calloc(items,sizeof(uintptr_t));
+  uintptr_t* p = (uintptr_t*)checked_calloc(items,sizeof(uintptr_t));
   if (p != NULL) {
     for (uintptr_t i = 0; i < items; i++) {
       assert(p[i] == 0);
@@ -175,7 +223,7 @@ static void free_items(void* p) {
       }
     }
   }
-  custom_free(p);
+  checked_free(p);
 }
 
 #ifdef MI_HEAP_WALK
@@ -190,6 +238,14 @@ static bool visit_blocks(const mi_theap_t* theap, const mi_theap_area_t* area, v
 #endif
 
 static void stress(intptr_t tid) {
+  #ifdef MI_CUDA_STRESS
+  CUresult status = cuCtxPushCurrent(context);
+  if (status != CUDA_SUCCESS) {
+    fprintf(stderr, "cuCtxPushCurrent failed (status=%d)\n", status);
+    abort();
+  }
+  #endif
+
   //bench_start_thread();
   uintptr_t r = ((tid + 1) * 43); // rand();
   const size_t max_item_shift = 5; // 128
@@ -199,7 +255,7 @@ static void stress(intptr_t tid) {
   void** data = NULL;
   size_t data_size = 0;
   size_t data_top = 0;
-  void** retained = (void**)custom_calloc(retain,sizeof(void*));
+  void** retained = (void**)checked_calloc(retain,sizeof(void*));
   size_t retain_top = 0;
 
   while (allocs > 0 || retain > 0) {
@@ -208,7 +264,7 @@ static void stress(intptr_t tid) {
       allocs--;
       if (data_top >= data_size) {
         data_size += 100000;
-        data = (void**)custom_realloc(data, data_size * sizeof(void*));
+        data = (void**)checked_realloc(data, data_size * sizeof(void*));
       }
       data[data_top++] = alloc_items(1ULL << (pick(&r) % max_item_shift), &r);
     }
@@ -246,8 +302,8 @@ static void stress(intptr_t tid) {
   for (size_t i = 0; i < data_top; i++) {
     free_items(data[i]);
   }
-  custom_free(retained);
-  custom_free(data);
+  checked_free(retained);
+  checked_free(data);
   //bench_end_thread();
 }
 
@@ -367,6 +423,24 @@ int main(int argc, char** argv) {
     // mi_option_set(mi_option_purge_delay,-1);
     mi_option_set(mi_option_page_reclaim_on_free, 0);
   #endif
+  #ifdef MI_CUDA_STRESS
+    CUdevice device = 0;
+    CUresult status = cuDeviceGet(&device, 0);
+    if (status != CUDA_SUCCESS) {
+      fprintf(stderr, "cuDeviceGet failed (status=%d)\n", status);
+      abort();
+    }
+    status = cuDevicePrimaryCtxRetain(&context, device);
+    if (status != CUDA_SUCCESS) {
+      fprintf(stderr, "cuDevicePrimaryCtxRetain failed (status=%d)\n", status);
+      abort();
+    }
+    status = cuCtxPushCurrent(context);
+    if (status != CUDA_SUCCESS) {
+      fprintf(stderr, "cuCtxPushCurrent failed (status=%d)\n", status);
+      abort();
+    }
+  #endif
 
   // > mimalloc-test-stress [THREADS] [SCALE] [ITER]
   if (argc >= 2) {
@@ -444,8 +518,8 @@ static DWORD WINAPI thread_entry(LPVOID param) {
 
 static void run_os_threads(size_t nthreads, void (*fun)(intptr_t)) {
   thread_entry_fun = fun;
-  DWORD* tids = (DWORD*)custom_calloc(nthreads,sizeof(DWORD));
-  HANDLE* thandles = (HANDLE*)custom_calloc(nthreads,sizeof(HANDLE));
+  DWORD* tids = (DWORD*)checked_calloc(nthreads,sizeof(DWORD));
+  HANDLE* thandles = (HANDLE*)checked_calloc(nthreads,sizeof(HANDLE));
   thandles[0] = GetCurrentThread(); // avoid lint warning
   const size_t start = (main_participates ? 1 : 0);
   for (size_t i = start; i < nthreads; i++) {
@@ -458,8 +532,8 @@ static void run_os_threads(size_t nthreads, void (*fun)(intptr_t)) {
   for (size_t i = start; i < nthreads; i++) {
     CloseHandle(thandles[i]);
   }
-  custom_free(tids);
-  custom_free(thandles);
+  checked_free(tids);
+  checked_free(thandles);
 }
 
 static void* atomic_exchange_ptr(volatile void** p, void* newval) {
@@ -480,7 +554,7 @@ static void* thread_entry(void* param) {
 
 static void run_os_threads(size_t nthreads, void (*fun)(intptr_t)) {
   thread_entry_fun = fun;
-  pthread_t* threads = (pthread_t*)custom_calloc(nthreads,sizeof(pthread_t));
+  pthread_t* threads = (pthread_t*)checked_calloc(nthreads,sizeof(pthread_t));
   memset(threads, 0, sizeof(pthread_t) * nthreads);
   const size_t start = (main_participates ? 1 : 0);
   //pthread_setconcurrency(nthreads);
@@ -491,7 +565,7 @@ static void run_os_threads(size_t nthreads, void (*fun)(intptr_t)) {
   for (size_t i = start; i < nthreads; i++) {
     pthread_join(threads[i], NULL);
   }
-  custom_free(threads);
+  checked_free(threads);
 }
 
 #ifdef __cplusplus
