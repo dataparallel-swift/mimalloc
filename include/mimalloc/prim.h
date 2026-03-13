@@ -134,11 +134,26 @@ void _mi_cuda_fallback_free(void* addr);
 
 extern mi_decl_hidden void* mi_cuda_context;
 extern mi_decl_hidden mi_decl_thread bool mi_cuda_in_api;
+extern mi_decl_hidden mi_decl_thread bool mi_cuda_thread_ready;
 extern mi_decl_hidden uint8_t* mi_cuda_fallback_base;
 extern mi_decl_hidden size_t mi_cuda_fallback_size;
 
 static inline bool _mi_prim_cuda_ready(void) {
-  return (mi_cuda_context != NULL && !mi_cuda_in_api);
+  // Fast path: once the process is initialised this is almost always true.
+  if mi_likely(mi_cuda_thread_ready) return true;
+
+  // Slow path, either:
+  //  1. CUDA is not yet ready; or
+  //  2. We are already inside a CUDA API call (during initialisation, or when
+  //     allocating a new slab, which should be rare); or
+  //  3. This thread has not been initialized yet (mi_cuda_thread_ready starts
+  //     as false for every new thread).
+  //
+  // Read the authoritative globals and lazily prime the TLS so subsequent calls
+  // hit the fast path.
+  const bool ready = (mi_cuda_context != NULL && !mi_cuda_in_api);
+  if (ready) { mi_cuda_thread_ready = true; }
+  return ready;
 }
 
 static inline bool _mi_cuda_fallback_contains(const void* addr) {
