@@ -85,6 +85,11 @@ static _Atomic(uintptr_t) mi_cuda_fallback_offset = MI_ATOMIC_VAR_INIT(0);
 
 mi_decl_hidden uint8_t* mi_cuda_fallback_base = NULL;
 mi_decl_hidden size_t mi_cuda_fallback_size = 0;
+
+// Combined ready-check: true iff CUDA is initialized and we are not currently
+// inside a CUDA API call. Written only on slow paths (init, enter/leave); read
+// on every mi_malloc hot path via _mi_prim_cuda_ready().
+mi_decl_hidden mi_decl_thread bool mi_cuda_thread_ready = false;
 mi_decl_hidden mi_decl_thread bool mi_cuda_in_api = false;
 #endif
 
@@ -92,6 +97,7 @@ static inline void mi_cuda_call_enter(void) {
   #if defined(MI_MALLOC_OVERRIDE)
   mi_assert_internal(!mi_cuda_in_api); // true means malloc() recursed inside a CUDA API call
   mi_cuda_in_api = true;
+  mi_cuda_thread_ready = false;
   #endif
 }
 
@@ -99,6 +105,7 @@ static inline void mi_cuda_call_leave(void) {
   #if defined(MI_MALLOC_OVERRIDE)
   mi_assert_internal(mi_cuda_in_api); // leave without matching enter
   mi_cuda_in_api = false;
+  mi_cuda_thread_ready = (mi_cuda_context != NULL);
   #endif
 }
 
@@ -277,6 +284,9 @@ int _mi_prim_cuda_init(void) {
   }
 
   mi_assert_internal(mi_cuda_context != NULL);
+  #if defined(MI_MALLOC_OVERRIDE)
+  mi_cuda_thread_ready = true;
+  #endif
   return 0;
 }
 
