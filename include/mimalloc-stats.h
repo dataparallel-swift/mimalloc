@@ -76,13 +76,9 @@ typedef struct mi_stat_counter_s {
   MI_STAT_COUNTER(pages_reclaim_on_alloc) \
   MI_STAT_COUNTER(pages_reclaim_on_free) \
   MI_STAT_COUNTER(pages_reabandon_full) \
-  MI_STAT_COUNTER(pages_unabandon_busy_wait)
-
-  // /* fallback bump allocator for CUDA backend */
-  // MI_CUDA_STAT_COUNTER(cuda_fallback_alloc)
-  // MI_CUDA_STAT_COUNTER(cuda_fallback_free)
-  // MI_CUDA_STAT_COUNTER(cuda_fallback_bytes)
-  // MI_CUDA_STAT_COUNTER(cuda_fallback_slop)
+  MI_STAT_COUNTER(pages_unabandon_busy_wait) \
+  /* fallback bump allocator for CUDA interposition mode */ \
+  MI_STAT_COUNT(malloc_cuda_fallback)
 
 // Size bins for chunks
 typedef enum mi_chunkbin_e {
@@ -109,7 +105,7 @@ typedef struct mi_stats_s
   mi_decl_align(8)  MI_STAT_FIELDS()
 
   // future extension
-  mi_stat_count_t   _stat_reserved[4];
+  mi_stat_count_t   _stat_reserved[3];
   mi_stat_counter_t _stat_counter_reserved[4];
 
   // size segregated statistics

@@ -406,6 +406,11 @@ void _mi_stats_print(const char* name, size_t id, mi_stats_t* stats, mi_output_f
     mi_process_info_print_out(out, arg);
     _mi_fprintf(out, arg, "\n");
   }
+
+  if (stats->malloc_cuda_fallback.total > 0) {
+    mi_print_header("cuda", out, arg);
+    mi_stat_print(&stats->malloc_cuda_fallback, "fallback", 1, out, arg);
+  }
 }
 
 

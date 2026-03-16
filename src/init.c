@@ -78,7 +78,9 @@ const mi_page_t _mi_page_empty = {
   MI_INIT5(MI_STAT_COUNT_NULL), \
   MI_INIT4(MI_STAT_COUNTER_NULL), \
   \
-  { MI_INIT4(MI_STAT_COUNT_NULL) }, \
+  MI_STAT_COUNT_NULL(), \
+  \
+  { MI_INIT3(MI_STAT_COUNT_NULL) }, \
   { MI_INIT4(MI_STAT_COUNTER_NULL) }, \
   \
   { MI_INIT74(MI_STAT_COUNT_NULL) }, \
