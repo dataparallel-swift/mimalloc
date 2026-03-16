@@ -76,6 +76,7 @@ enum mi_cuda_fallback_e {
 
 static _Atomic(uintptr_t) mi_cuda_init_state = MI_ATOMIC_VAR_INIT(MI_CUDA_INIT_UNINIT);
 mi_decl_hidden void* mi_cuda_context = NULL;
+static CUdevice mi_cuda_device = -1;
 
 #if defined(MI_MALLOC_OVERRIDE)
 #define MI_CUDA_FALLBACK_RESERVE_SIZE (16*MI_MiB)
@@ -111,7 +112,15 @@ static inline void mi_cuda_call_leave(void) {
 
 static int mi_cuda_error(CUresult status, const char* api_name) {
   if (status == CUDA_SUCCESS) return 0;
-  _mi_warning_message("CUDA call failed in %s (status: %d)\n", api_name, (int)status);
+  const char* name = NULL;
+  const char* desc = NULL;
+  cuGetErrorName(status, &name);
+  cuGetErrorString(status, &desc);
+  _mi_warning_message("CUDA call failed in %s with %s (%d): %s\n",
+                      api_name,
+                      name  != NULL ? name  : "<unknown>",
+                      (int)status,
+                      desc  != NULL ? desc  : "<unknown error>");
   switch(status) {
     case CUDA_ERROR_OUT_OF_MEMORY:      return ENOMEM;
     case CUDA_ERROR_NO_DEVICE:          return ENODEV;
@@ -132,6 +141,20 @@ static int mi_cuda_cuDeviceGet(CUdevice* device, int ordinal) {
   CUresult status = cuDeviceGet(device, ordinal);
   mi_cuda_call_leave();
   return mi_cuda_error(status, "cuDeviceGet");
+}
+
+static int mi_cuda_cuDeviceGetName(char* name, int len, CUdevice dev) {
+  mi_cuda_call_enter();
+  CUresult status = cuDeviceGetName(name, len, dev);
+  mi_cuda_call_leave();
+  return mi_cuda_error(status, "cuDeviceGetName");
+}
+
+static int mi_cuda_cuDeviceTotalMem(size_t* bytes, CUdevice dev) {
+  mi_cuda_call_enter();
+  CUresult status = cuDeviceTotalMem(bytes, dev);
+  mi_cuda_call_leave();
+  return mi_cuda_error(status, "cuDeviceTotalMem");
 }
 
 static int mi_cuda_cuDevicePrimaryCtxRetain(CUcontext* pctx, CUdevice dev) {
@@ -271,6 +294,7 @@ int _mi_prim_cuda_init(void) {
       mi_atomic_store_release(&mi_cuda_init_state, (uintptr_t)MI_CUDA_INIT_FAILED);
       return (err != 0 ? err : ENODEV);
     }
+    mi_cuda_device = device;
     mi_cuda_context = context;
     mi_atomic_store_release(&mi_cuda_init_state, (uintptr_t)MI_CUDA_INIT_READY);
   }
@@ -1014,6 +1038,49 @@ void _mi_prim_thread_associate_default_theap(mi_theap_t* theap) {
 
 bool _mi_prim_thread_is_in_threadpool(void) {
   return false;
+}
+
+#define MI_PRIM_HAS_ALLOCATOR_INIT
+
+bool _mi_is_redirected(void) {
+  #if defined(MI_MALLOC_OVERRIDE)
+  return true;
+  #else
+  return false;
+  #endif
+}
+
+bool _mi_allocator_init(const char** message) {
+  if (message != NULL && mi_cuda_device >= 0) {
+    static char buf[128];
+    char devname[64] = "<unknown>";
+    size_t bytes = 0;
+    int err = mi_cuda_cuDeviceGetName(devname, (int)sizeof(devname), mi_cuda_device);
+    if (err == 0) err = mi_cuda_cuDeviceTotalMem(&bytes, mi_cuda_device);
+    if (err == 0) {
+      size_t gib_10 = (bytes * 10) / MI_GiB;
+      _mi_snprintf(buf, sizeof(buf), "mimalloc: using CUDA host memory allocator (device %d: %s, %zu.%zu GiB global memory, context=%p)\n",
+                   (int)mi_cuda_device, devname, gib_10 / 10, gib_10 % 10, mi_cuda_context);
+      *message = buf;
+    }
+  }
+  return true;
+}
+
+void _mi_allocator_done(void) {
+  if (mi_cuda_device >= 0) {
+    // Ignore errors: CUDA may already be shutting down (CUDA_ERROR_NOT_INITIALIZED=3,
+    // CUDA_ERROR_DEINITIALIZED=4), and there is nothing useful to do at this point anyway.
+    cuDevicePrimaryCtxRelease(mi_cuda_device);
+    mi_atomic_store_release(&mi_cuda_init_state, (uintptr_t)MI_CUDA_INIT_UNINIT);
+    // Only clears TLS for the calling (main) thread. Worker threads will still
+    // have mi_cuda_thread_ready=true, but _mi_prim_alloc asserts context!=NULL
+    // so they must not be running allocations at this point. In practice
+    // shutdown tends to join worker threads first, so unlikely to be an issue.
+    mi_cuda_thread_ready = false;
+    mi_cuda_context = NULL;
+    mi_cuda_device = -1;
+  }
 }
 
 #endif  // _WIN32
