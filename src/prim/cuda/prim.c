@@ -249,8 +249,10 @@ int _mi_cuda_fallback_alloc_aligned(size_t size, size_t alignment, void** addr) 
   // Store the rounded size in the header word immediately before the allocation.
   *(size_t*)(ptr - 16) = rsize;
 
-  // mi_os_stat_counter_increase(cuda_fallback_alloc, 1);
-  // mi_os_stat_counter_increase(cuda_fallback_bytes, reserve);
+  #if MI_STAT
+  mi_os_stat_increase(malloc_cuda_fallback, reserve);
+  #endif
+
   *addr = (void*)ptr;
   return 0;
 }
@@ -260,8 +262,12 @@ int _mi_cuda_fallback_alloc(size_t size, void** addr) {
 }
 
 void _mi_cuda_fallback_free(void* addr) {
+  #if MI_STAT
+  size_t size = _mi_cuda_fallback_sizeof(addr);
+  mi_os_stat_decrease(malloc_cuda_fallback, size);
+  #else
   MI_UNUSED(addr);
-  // mi_os_stat_counter_increase(cuda_fallback_free, 1);
+  #endif
 }
 #endif
 
