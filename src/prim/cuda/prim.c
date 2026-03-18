@@ -72,6 +72,7 @@ enum mi_cuda_fallback_e {
   MI_CUDA_FALLBACK_UNINIT = 0,
   MI_CUDA_FALLBACK_INITING = 1,
   MI_CUDA_FALLBACK_READY = 2,
+  MI_CUDA_FALLBACK_FAILED = 3
 };
 
 static _Atomic(uintptr_t) mi_cuda_init_state = MI_ATOMIC_VAR_INIT(MI_CUDA_INIT_UNINIT);
@@ -193,34 +194,41 @@ static int mi_cuda_cuMemFreeHost(void* p) {
 }
 
 #if defined(MI_MALLOC_OVERRIDE)
-static bool mi_cuda_fallback_ensure(void) {
-  if (mi_atomic_load_acquire(&mi_cuda_fallback_state) == MI_CUDA_FALLBACK_READY) {
-    return (mi_cuda_fallback_base != NULL);
-  }
-
-  uintptr_t expected = MI_CUDA_FALLBACK_UNINIT;
-  if (mi_atomic_cas_strong_acq_rel(&mi_cuda_fallback_state, &expected, (uintptr_t)MI_CUDA_FALLBACK_INITING)) {
+static int _mi_cuda_fallback_init(void) {
+  // Initialise the arena allocator that will be used in malloc-override mode
+  // for recursive invocations during CUDA initialisation.
+  const uintptr_t expected = MI_CUDA_FALLBACK_UNINIT;
+  const bool do_init = mi_atomic_cas_strong_acq_rel(&mi_cuda_fallback_state, &expected, (uintptr_t)MI_CUDA_FALLBACK_INITING);
+  if (do_init) {
     const size_t reserve_size = MI_CUDA_FALLBACK_RESERVE_SIZE;
     void* p = mmap(NULL, reserve_size, (PROT_READ | PROT_WRITE), (MAP_PRIVATE | MAP_ANONYMOUS), -1, 0);
     if (p != MAP_FAILED) {
       mi_cuda_fallback_base = (uint8_t*)p;
       mi_cuda_fallback_size = reserve_size;
+      mi_atomic_store_release(&mi_cuda_fallback_state, (uintptr_t)MI_CUDA_FALLBACK_READY);
+    } else {
+      mi_atomic_store_release(&mi_cuda_fallback_state, (uintptr_t)MI_CUDA_FALLBACK_FAILED);
+      return ENOMEM;
     }
-    mi_atomic_store_release(&mi_cuda_fallback_state, (uintptr_t)MI_CUDA_FALLBACK_READY);
   }
   else {
-    while (mi_atomic_load_acquire(&mi_cuda_fallback_state) == MI_CUDA_FALLBACK_INITING) {
+    do {
+      const uintptr_t state = mi_atomic_load_acquire(&mi_cuda_fallback_state);
+      if (state == MI_CUDA_FALLBACK_FAILED) return ENOMEM;
+      if (state == MI_CUDA_FALLBACK_READY) break;
       mi_atomic_yield();
-    }
+    } while (true);
   }
 
-  return (mi_cuda_fallback_base != NULL);
+  mi_assert_internal(mi_cuda_fallback_base != NULL);
+  return 0;
 }
 
 int _mi_cuda_fallback_alloc_aligned(size_t size, size_t alignment, void** addr) {
   mi_assert_internal(alignment >= 16 && (alignment & (alignment - 1)) == 0); // power of two, at least 16
 
-  if (!mi_cuda_fallback_ensure()) return ENOMEM;
+  // Ensure that the bump allocator is ready
+  if mi_unlikely(_mi_cuda_fallback_init() != 0) return ENOMEM;
 
   // Round size up to a multiple of 16. This lets realloc safely copy rsize
   // bytes from a fallback allocation without reading out-of-bounds.
@@ -262,6 +270,10 @@ int _mi_cuda_fallback_alloc(size_t size, void** addr) {
 }
 
 void _mi_cuda_fallback_free(void* addr) {
+  // The fallback arena allocator only ever frees its memory on process
+  // shutdown. This is a bounded amount of waste (the arena never grows if
+  // exhausted), but mostly this data needs to remain alive for the life of the
+  // program anyway (e.g. mi_cuda_context).
   #if MI_STAT
   size_t size = _mi_cuda_fallback_sizeof(addr);
   mi_os_stat_decrease(malloc_cuda_fallback, size);
@@ -279,17 +291,8 @@ int _mi_prim_cuda_init(void) {
   // to access this host memory from those contexts is always equal to the
   // returned host pointer. Thus it is safe to initialise only the first device
   // and use the default context.
-  uintptr_t state = mi_atomic_load_acquire(&mi_cuda_init_state);
-  if (state == MI_CUDA_INIT_FAILED) {
-    return ENODEV;
-  }
-
-  bool do_init = false;
-  if (state == MI_CUDA_INIT_UNINIT) {
-    uintptr_t expected = MI_CUDA_INIT_UNINIT;
-    do_init = mi_atomic_cas_strong_acq_rel(&mi_cuda_init_state, &expected, (uintptr_t)MI_CUDA_INIT_INITING);
-  }
-
+  const uintptr_t expected = MI_CUDA_INIT_UNINIT;
+  const bool do_init = mi_atomic_cas_strong_acq_rel(&mi_cuda_init_state, &expected, (uintptr_t)MI_CUDA_INIT_INITING);
   if (do_init) {
     CUdevice device = 0;
     CUcontext context = NULL;
@@ -306,7 +309,7 @@ int _mi_prim_cuda_init(void) {
   }
   else {
     do {
-      state = mi_atomic_load_acquire(&mi_cuda_init_state);
+      const uintptr_t state = mi_atomic_load_acquire(&mi_cuda_init_state);
       if (state == MI_CUDA_INIT_FAILED) return ENODEV;
       if (state == MI_CUDA_INIT_READY) break;
       mi_atomic_yield();
@@ -1087,6 +1090,14 @@ void _mi_allocator_done(void) {
     mi_cuda_context = NULL;
     mi_cuda_device = -1;
   }
+
+  // In malloc override mode, leave the fallback bump allocator to be
+  // released automatically. If we release it ourselves, this may be before
+  // objects that we allocated in that region have been released (e.g. CUDA
+  // event handlers) which will then attempt to access invalid memory. We could
+  // (potentially) take care of this with an additional transition in the
+  // fallback state machine, but that adds an atomic access to the fast path of
+  // mi_free, which we don't want to endure.
 }
 
 #endif  // _WIN32
