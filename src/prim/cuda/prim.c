@@ -61,13 +61,6 @@ static inline int mi_prim_close(int fd) {
 // Initialise
 //---------------------------------------------
 
-enum mi_cuda_init_e {
-  MI_CUDA_INIT_UNINIT = 0,
-  MI_CUDA_INIT_INITING = 1,
-  MI_CUDA_INIT_READY = 2,
-  MI_CUDA_INIT_FAILED = 3
-};
-
 enum mi_cuda_fallback_e {
   MI_CUDA_FALLBACK_UNINIT = 0,
   MI_CUDA_FALLBACK_INITING = 1,
@@ -75,8 +68,8 @@ enum mi_cuda_fallback_e {
   MI_CUDA_FALLBACK_FAILED = 3
 };
 
-static _Atomic(uintptr_t) mi_cuda_init_state = MI_ATOMIC_VAR_INIT(MI_CUDA_INIT_UNINIT);
-mi_decl_hidden void* mi_cuda_context = NULL;
+mi_decl_hidden _Atomic(uintptr_t) mi_cuda_init_state = MI_ATOMIC_VAR_INIT(MI_CUDA_INIT_UNINIT);
+static CUcontext mi_cuda_context = NULL;
 static CUdevice mi_cuda_device = -1;
 
 #if defined(MI_MALLOC_OVERRIDE)

@@ -132,7 +132,14 @@ int _mi_cuda_fallback_alloc_aligned(size_t size, size_t alignment, void** addr);
 int _mi_cuda_fallback_alloc(size_t size, void** addr);
 void _mi_cuda_fallback_free(void* addr);
 
-extern mi_decl_hidden void* mi_cuda_context;
+enum mi_cuda_init_e {
+  MI_CUDA_INIT_UNINIT   = 0,
+  MI_CUDA_INIT_INITING  = 1,
+  MI_CUDA_INIT_READY    = 2,
+  MI_CUDA_INIT_FAILED   = 3
+};
+
+extern mi_decl_hidden _Atomic(uintptr_t) mi_cuda_init_state;
 extern mi_decl_hidden mi_decl_thread bool mi_cuda_in_api;
 extern mi_decl_hidden mi_decl_thread bool mi_cuda_thread_ready;
 extern mi_decl_hidden uint8_t* mi_cuda_fallback_base;
@@ -149,9 +156,13 @@ static inline bool _mi_prim_cuda_ready(void) {
   //  3. This thread has not been initialized yet (mi_cuda_thread_ready starts
   //     as false for every new thread).
   //
-  // Read the authoritative globals and lazily prime the TLS so subsequent calls
-  // hit the fast path.
-  const bool ready = (mi_cuda_context != NULL && !mi_cuda_in_api);
+  // Use an acquire-load of mi_cuda_init_state rather than reading mi_cuda_context
+  // directly. The init path writes mi_cuda_context and then does a store-release
+  // of mi_cuda_init_state, so an acquire-load that observes READY establishes
+  // happens-before and guarantees mi_cuda_context is visible. This matters on
+  // weak-memory architectures (ARM64) where a plain load could see a stale NULL.
+  const bool ready = (mi_atomic_load_acquire(&mi_cuda_init_state) == (uintptr_t)MI_CUDA_INIT_READY
+                      && !mi_cuda_in_api);
   if (ready) { mi_cuda_thread_ready = true; }
   return ready;
 }
